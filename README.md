@@ -1,1 +1,3 @@
-##PATH BASED REFLECTION - DETECTOR
+**PATH BASED REFLECTION - DETECTOR**
+
+`go build -o txss main.go`
