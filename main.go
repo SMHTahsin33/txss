@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -21,27 +22,38 @@ type pathCheck struct {
 	path        string
 }
 
-var transport = &http.Transport{
-	TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	DialContext: (&net.Dialer{
-		Timeout:   15 * time.Second,
-		KeepAlive: time.Second,
-		DualStack: true,
-	}).DialContext,
-}
+var (
+	debug       bool
+	concurrency int
+	transport   = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: time.Second,
+			DualStack: true,
+		}).DialContext,
+	}
+	httpClient = &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second, // Adjust timeout as needed
+	}
+)
 
-var httpClient = &http.Client{
-	Transport: transport,
+func init() {
+	flag.BoolVar(&debug, "debug", false, "Enable debug output")
+	flag.IntVar(&concurrency, "t", 40, "Number of concurrent workers") // Set default concurrency to 40
+	flag.Parse()
 }
 
 func main() {
 	sc := bufio.NewScanner(os.Stdin)
+	hasInput := false
 	initialPathChecks := make(chan pathCheck, 100)
 	donePaths := makePoolPath(initialPathChecks, func(c pathCheck, output chan pathCheck) {
 		// Perform path reflection check on the final redirected URL
 		reflected, basic, err := checkPathReflected(c.baseURL, c.path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error from checkPathReflected for url %s with path %s: %s\n", c.baseURL, c.path, err)
+			fmt.Fprintf(os.Stderr, "Error from checkPathReflected for URL %s with path %s: %s\n", c.baseURL, c.path, err)
 			return
 		}
 		if len(reflected) > 0 || basic != "" {
@@ -55,6 +67,7 @@ func main() {
 	})
 
 	for sc.Scan() {
+		hasInput = true
 		inputURL := sc.Text()
 		// Ensure URL ends with a trailing slash
 		if !strings.HasSuffix(inputURL, "/") {
@@ -71,40 +84,70 @@ func main() {
 		}
 	}
 
+	if !hasInput {
+		fmt.Fprintln(os.Stderr, "Error: No input provided.")
+		return
+	}
+
 	close(initialPathChecks)
 	<-donePaths
 }
 
 func getFinalRedirectURL(inputURL string) string {
 	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
+		// Limit the number of redirects
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		return nil
 	}
 
 	req, err := http.NewRequest("GET", inputURL, nil)
 	if err != nil {
+		if debug {
+			fmt.Printf("\033[31mError creating request for URL %s: %s\033[0m\n", inputURL, err)
+		}
 		return inputURL
 	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		if debug {
+			fmt.Printf("\033[31mError making request for URL %s: %s\033[0m\n", inputURL, err)
+		}
 		return inputURL
 	}
 	defer resp.Body.Close()
 
-	// Follow redirects to get the final URL
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+	switch resp.StatusCode {
+	case 301, 302, 303, 307, 308:
+		// Handle redirect responses
 		finalURL := resp.Header.Get("Location")
+		if finalURL == "" {
+			return inputURL
+		}
 		if !strings.HasPrefix(finalURL, "http") {
 			finalURL = req.URL.Scheme + "://" + req.URL.Host + finalURL
 		}
-		// Ensure the final URL ends with a trailing slash
 		if !strings.HasSuffix(finalURL, "/") {
 			finalURL += "/"
 		}
 		return getFinalRedirectURL(finalURL)
-	}
 
-	return inputURL
+	case 200:
+		// Successfully received the resource
+		return inputURL
+
+	case 304:
+		// Resource not modified, treat as final URL
+		return inputURL
+
+	default:
+		if debug {
+			fmt.Printf("\033[33mUnexpected status code %d for URL %s\033[0m\n", resp.StatusCode, inputURL)
+		}
+		return inputURL
+	}
 }
 
 func splitBaseURLAndPath(inputURL string) (string, string) {
@@ -209,7 +252,7 @@ func makePoolPath(input chan pathCheck, fn workerFuncPath) chan pathCheck {
 	var wg sync.WaitGroup
 
 	output := make(chan pathCheck)
-	for i := 0; i < 100; i++ {
+	for i := 0; i < concurrency; i++ { // Use the concurrency flag
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
