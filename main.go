@@ -119,36 +119,21 @@ func getFinalRedirectURL(inputURL string) string {
 	}
 	defer resp.Body.Close()
 
-	switch resp.StatusCode {
-	case 301, 302, 303, 307, 308:
-		// Handle redirect responses
-		finalURL := resp.Header.Get("Location")
-		if finalURL == "" {
-			return inputURL
+	// Check for a Location header to identify redirects
+	if location := resp.Header.Get("Location"); location != "" {
+		if !strings.HasPrefix(location, "http") {
+			location = req.URL.Scheme + "://" + req.URL.Host + location
 		}
-		if !strings.HasPrefix(finalURL, "http") {
-			finalURL = req.URL.Scheme + "://" + req.URL.Host + finalURL
+		if !strings.HasSuffix(location, "/") {
+			location += "/"
 		}
-		if !strings.HasSuffix(finalURL, "/") {
-			finalURL += "/"
-		}
-		return getFinalRedirectURL(finalURL)
-
-	case 200:
-		// Successfully received the resource
-		return inputURL
-
-	case 304:
-		// Resource not modified, treat as final URL
-		return inputURL
-
-	default:
-		if debug {
-			fmt.Printf("\033[33mUnexpected status code %d for URL %s\033[0m\n", resp.StatusCode, inputURL)
-		}
-		return inputURL
+		return getFinalRedirectURL(location)
 	}
+
+	// If no Location header is present, return the current URL
+	return inputURL
 }
+
 
 func splitBaseURLAndPath(inputURL string) (string, string) {
 	u, err := url.Parse(inputURL)
@@ -170,7 +155,6 @@ func checkPathReflected(baseURL, path string) ([]string, string, error) {
 	identifier := "smhtahxssin33" // Identifier to attach directly with special characters
 
 	identifierReflected := false
-	hasSpecialCharsReflected := false
 
 	// Check if only the identifier is reflected
 	reqURLIdentifier := baseURL + path + identifier
@@ -198,54 +182,57 @@ func checkPathReflected(baseURL, path string) ([]string, string, error) {
 	// Check if the body contains only the identifier
 	if strings.Contains(body, identifier) {
 		identifierReflected = true
-	}
-
-	// Check if the body contains the special character after the identifier
-	for _, char := range specialChars {
-		reqURL := baseURL + path + identifier + char
-
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return nil, "", err
-		}
-
-		req.Header.Add("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.100 Safari/537.36")
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return nil, "", err
-		}
-		defer resp.Body.Close()
-
-		// Reading the response body
-		b, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return nil, "", err
-		}
-
-		body = string(b)
-
-		// Check if the body contains the special character after the identifier
-		if strings.Contains(body, identifier+char) {
-			reflectedChars[char] = true
-			hasSpecialCharsReflected = true
-		}
-	}
-
-	// Convert map to slice to eliminate duplicates
-	reflected := []string{}
-	for char := range reflectedChars {
-		reflected = append(reflected, char)
+	} else if debug {
+		fmt.Printf("\033[33mNo reflection for identifier %s in URL %s\033[0m\n", identifier, reqURLIdentifier)
 	}
 
 	if identifierReflected {
+		hasSpecialCharsReflected := false
+		// Check if the body contains the special character after the identifier
+		for _, char := range specialChars {
+			reqURL := baseURL + path + identifier + char
+
+			req, err := http.NewRequest("GET", reqURL, nil)
+			if err != nil {
+				return nil, "", err
+			}
+
+			req.Header.Add("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.100 Safari/537.36")
+
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return nil, "", err
+			}
+			defer resp.Body.Close()
+
+			// Reading the response body
+			b, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				return nil, "", err
+			}
+
+			body = string(b)
+
+			// Check if the body contains the special character after the identifier
+			if strings.Contains(body, identifier+char) {
+				reflectedChars[char] = true
+				hasSpecialCharsReflected = true
+			}
+		}
+
+		// Convert map to slice to eliminate duplicates
+		reflected := []string{}
+		for char := range reflectedChars {
+			reflected = append(reflected, char)
+		}
+
 		if hasSpecialCharsReflected {
 			return reflected, "", nil
 		}
 		return nil, "[basic]", nil
 	}
 
-	return reflected, "", nil
+	return nil, "", nil
 }
 
 func makePoolPath(input chan pathCheck, fn workerFuncPath) chan pathCheck {
