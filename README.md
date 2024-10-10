@@ -1,7 +1,7 @@
 <h1>TXSS - Path Based Special Character Reflection Checker</h1>
 
 <b>Install directly</b> <br>
-<code>go install -v github.com/SMHTahsin33/tXSS@latest</code>
+<code>go install -v github.com/SMHTahsin33/txss@latest</code>
 
 <b>Install from the source:</b> <br>
 <code>go build -o txss main.go</code>
